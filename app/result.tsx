@@ -1,5 +1,5 @@
 import { useLocalSearchParams } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import {
   View,
   Text,
@@ -9,14 +9,29 @@ import {
   ScrollView,
   TextInput,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import * as Speech from 'expo-speech';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { router } from 'expo-router';
 
 type Prompt = { l2: string; l1: string };
+type Flashcard = {
+  id: string;
+  object: string;
+  target: string;
+  level: string;
+  translated: string;
+  prompts: Prompt[];
+  imageUri: string;
+  createdAt: number;
+};
 
 const LABELS_URL = 'https://wundr-delta.vercel.app/api/labels';
 const PROMPTS_URL = 'https://wundr-delta.vercel.app/api/prompts';
+const TRANSLATE_URL = 'https://wundr-delta.vercel.app/api/translate';
 
+// Supported languages
 const LANGS: Record<string, { code: string; voice: string }> = {
   Spanish: { code: 'es', voice: 'es-ES' },
   French: { code: 'fr', voice: 'fr-FR' },
@@ -27,31 +42,41 @@ const LANGS: Record<string, { code: string; voice: string }> = {
   Chinese: { code: 'zh', voice: 'zh-CN' },
 };
 
-function stubTranslate(word: string, to: string) {
-  const mini: Record<string, Record<string, string>> = {
-    guitar: { es: 'la guitarra', fr: 'la guitare', de: 'die Gitarre' },
-    apple: { es: 'la manzana', fr: 'la pomme', de: 'der Apfel' },
-  };
-  return mini[word?.toLowerCase()]?.[to] ?? word;
-}
-
 function voiceLang(target: string) {
   const entry = Object.values(LANGS).find((l) => l.code === target);
   return entry?.voice ?? 'en-US';
 }
 
+async function getFlashcard(id: string): Promise<Flashcard | null> {
+  try {
+    const raw = await AsyncStorage.getItem(`flashcard:${id}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveFlashcard(card: Flashcard) {
+  await AsyncStorage.setItem(`flashcard:${card.id}`, JSON.stringify(card));
+}
+
 export default function ResultScreen() {
   const { uri, base64 } = useLocalSearchParams<{ uri: string; base64: string }>();
+
   const [target, setTarget] = useState<string>('es');
   const [labels, setLabels] = useState<{ label: string; score: number }[]>([]);
   const [object, setObject] = useState('');
   const [loading, setLoading] = useState(true);
 
+  const [l2Word, setL2Word] = useState('');
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [pLoading, setPLoading] = useState(false);
   const [level, setLevel] = useState<'A1' | 'A2' | 'B1' | 'B2'>('A2');
 
-  // object detection
+  const [fromCache, setFromCache] = useState(false);
+  const [alreadySaved, setAlreadySaved] = useState(false);
+
+  // 1) Detect labels once
   useEffect(() => {
     (async () => {
       try {
@@ -71,32 +96,47 @@ export default function ResultScreen() {
     })();
   }, [base64]);
 
-  // AI prompts
+  // 2) Load cached card if present; otherwise fetch translate/prompts (but DO NOT save automatically)
   useEffect(() => {
     const run = async () => {
       if (!object) return;
+      const id = `${target}-${object}-${level}`;
+
+      // Check if card exists → use it and mark as saved
+      const cached = await getFlashcard(id);
+      if (cached) {
+        setL2Word(cached.translated);
+        setPrompts(cached.prompts);
+        setFromCache(true);
+        setAlreadySaved(true);
+        return;
+      }
+
+      // Not cached → fetch APIs (opt-in save later)
+      setFromCache(false);
+      setAlreadySaved(false);
       setPLoading(true);
       try {
-        const res = await fetch(PROMPTS_URL, {
+        const tRes = await fetch(TRANSLATE_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            object,
-            L1: 'en',
-            L2: target,
-            level,
-          }),
+          body: JSON.stringify({ word: object, target }),
         });
-        const text = await res.text();
-        let json;
-        try {
-          json = JSON.parse(text);
-        } catch {
-          throw new Error('Prompt API did not return JSON: ' + text.slice(0, 200));
-        }
-        setPrompts(Array.isArray(json.prompts) ? json.prompts : []);
+        const tJson = await tRes.json();
+        const translated = tJson?.translated ?? object;
+
+        const pRes = await fetch(PROMPTS_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ object, L1: 'en', L2: target, level }),
+        });
+        const pJson = await pRes.json();
+
+        setL2Word(translated);
+        setPrompts(Array.isArray(pJson.prompts) ? pJson.prompts : []);
       } catch (e) {
-        console.warn('Prompt fetch error', e);
+        console.warn('Translate/Prompt fetch error', e);
+        setL2Word(object);
         setPrompts([]);
       } finally {
         setPLoading(false);
@@ -105,27 +145,34 @@ export default function ResultScreen() {
     run();
   }, [object, target, level]);
 
-  const [l2Word, setL2Word] = useState('');
+  const canSave = useMemo(
+    () => !!object && !!l2Word && prompts.length > 0 && !alreadySaved,
+    [object, l2Word, prompts, alreadySaved]
+  );
 
-  useEffect(() => {
-    const run = async () => {
-      if (!object) return;
-      try {
-        const res = await fetch("https://wundr-delta.vercel.app/api/translate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ word: object, target }),
-        });
-        const json = await res.json();
-        setL2Word(json.translated ?? object); // fallback to English
-      } catch (e) {
-        console.warn("Translate error", e);
-        setL2Word(object);
-      }
-    };
-    run();
-  }, [object, target]);
-
+  const onSave = async () => {
+    if (!canSave) return;
+    try {
+      const id = `${target}-${object}-${level}`;
+      const card: Flashcard = {
+        id,
+        object,
+        target,
+        level,
+        translated: l2Word,
+        prompts,
+        imageUri: (uri as string) ?? '',
+        createdAt: Date.now(),
+      };
+      await saveFlashcard(card);
+      setAlreadySaved(true);
+      Alert.alert('Saved', 'Flashcard added to your deck.');
+      router.push('/flashcards');  
+    } catch (e) {
+      Alert.alert('Oops', 'Could not save flashcard.');
+      console.warn('Save flashcard failed', e);
+    }
+  };
 
   return (
     <ScrollView contentContainerStyle={styles.wrap}>
@@ -162,7 +209,7 @@ export default function ResultScreen() {
         autoCapitalize="none"
       />
 
-      {/* 🔤 Language chips */}
+      {/* Language chips */}
       <View style={styles.rowWrap}>
         {Object.entries(LANGS).map(([name, { code }]) => (
           <TouchableOpacity
@@ -175,7 +222,7 @@ export default function ResultScreen() {
         ))}
       </View>
 
-      {/* 📊 CEFR level selector */}
+      {/* CEFR level selector */}
       <View style={styles.row}>
         {(['A1', 'A2', 'B1', 'B2'] as const).map((l) => (
           <TouchableOpacity
@@ -188,10 +235,13 @@ export default function ResultScreen() {
         ))}
       </View>
 
-      {/* 📝 Show translated word */}
-      {l2Word ? (
+      {/* Translated word */}
+      {!!l2Word && (
         <View style={styles.card}>
-          <Text style={styles.l2}>{l2Word}</Text>
+          <View style={{ flex: 1, paddingRight: 12 }}>
+            <Text style={styles.l2}>{l2Word}</Text>
+            {fromCache ? <Text style={styles.badge}>from flashcards</Text> : null}
+          </View>
           <TouchableOpacity
             onPress={() => Speech.speak(l2Word, { language: voiceLang(target) })}
             style={styles.tts}
@@ -199,8 +249,18 @@ export default function ResultScreen() {
             <Text style={{ color: 'white' }}>▶︎</Text>
           </TouchableOpacity>
         </View>
-      ) : null}
+      )}
 
+      {/* Save button */}
+      <TouchableOpacity
+        disabled={!canSave}
+        onPress={onSave}
+        style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
+      >
+        <Text style={styles.saveBtnText}>
+          {alreadySaved ? 'Saved ✓' : 'Save flashcard'}
+        </Text>
+      </TouchableOpacity>
 
       <Text style={styles.h2}>Speak prompts</Text>
       {pLoading && <ActivityIndicator />}
@@ -254,6 +314,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   l2: { fontSize: 20, fontWeight: '700' },
+  badge: { marginTop: 2, color: '#666', fontSize: 12 },
   tts: {
     width: 36,
     height: 36,
@@ -262,6 +323,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#111',
     borderRadius: 999,
   },
+  saveBtn: {
+    backgroundColor: '#111',
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  saveBtnDisabled: { opacity: 0.5 },
+  saveBtnText: { color: 'white', fontWeight: '600' },
   prompt: {
     padding: 12,
     borderRadius: 12,
