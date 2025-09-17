@@ -14,7 +14,7 @@ export default function Layout() {
         }}
       />
       <Tabs.Screen
-        name="flashcards"
+        name="flashcards/index"
         options={{
           title: 'Flashcards',
           tabBarIcon: ({ color, size }) => (
@@ -25,6 +25,8 @@ export default function Layout() {
       {/* Hidden routes */}
       <Tabs.Screen name="result" options={{ href: null }} />
       <Tabs.Screen name="camera" options={{ href: null }} />
+      <Tabs.Screen name="flashcards/[id]" options={{ href: null }} />
+
     </Tabs>
   );
 }
