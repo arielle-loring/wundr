@@ -38,8 +38,8 @@ export default function CameraScreen() {
           disabled={!ready}
           onPress={async () => {
             const photo = await camRef.current?.takePictureAsync({ quality: 0.5, base64: true });
-            if (!photo) return;
-            router.push({ pathname: '/result', params: { uri: photo.uri } });
+            if (!photo?.base64) return;
+            router.push({ pathname: '/result', params: { uri: photo.uri, base64: photo.base64 } });
           }}
           style={[styles.shutter, { opacity: ready ? 1 : 0.5 }]}
         />
